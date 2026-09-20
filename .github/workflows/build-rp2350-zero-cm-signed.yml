@@ -1,0 +1,95 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (C) 2026 RS-Key contributors
+
+name: build-rp2350-zero-cm-signed
+
+on:
+  workflow_dispatch:
+    inputs:
+      rollback_version:
+        description: 'Rollback version counter (default: 1)'
+        required: true
+        default: '1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-rp2350-zero-cm-signed-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-sign:
+    name: Build & Sign RP2350-Zero-CM (Yubikey5)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+
+      - name: Build unsigned firmware with Nix
+        run: |
+          nix build --impure --expr \
+            '(builtins.getFlake (toString ./.)).lib.${builtins.currentSystem}.mkFirmware {
+               name = "rs-key-rp2350-zero-cm-yubikey5";
+               flashSize = "2M";
+               kvmain = "896K";
+               vidpid = "Yubikey5";
+             }'
+
+      - name: Sign firmware using picotool
+        env:
+          SECURE_BOOT_KEY: ${{ secrets.SECURE_BOOT_KEY }}
+          ROLLBACK_VER: ${{ github.event.inputs.rollback_version || '1' }}
+        run: |
+          if [ -z "$SECURE_BOOT_KEY" ]; then
+            echo "::error::Secret SECURE_BOOT_KEY is not set!"
+            exit 1
+          fi
+
+          mkdir -p dist ~/.secrets
+          echo "$SECURE_BOOT_KEY" > ~/.secrets/secure_boot_key.pem
+          chmod 600 ~/.secrets/secure_boot_key.pem
+
+          # 在 nix 环境中运行 picotool 进行签名和验证
+          # 注意：nix mkFirmware 产出的 result/*.elf 已经自带分区表，直接签名即可
+          nix develop -c bash -c "
+            set -euo pipefail
+
+            ELF_SRC=\$(ls result/*.elf | head -n 1)
+
+            # 1. 签名 ELF，同时导出 otp_secureboot.json
+            picotool seal --sign --hash \"\$ELF_SRC\" -t elf dist/firmware-signed.elf -t elf \
+              ~/.secrets/secure_boot_key.pem dist/otp_secureboot.json \
+              --major 1 --minor 0 --rollback $ROLLBACK_VER
+
+            # 2. 将签名的 ELF 转换为 UF2
+            picotool uf2 convert dist/firmware-signed.elf -t elf dist/firmware-signed.uf2
+
+            # 3. 校验签名
+            picotool info -a dist/firmware-signed.elf
+          "
+
+          # 抹除临时密钥文件
+          shred -u ~/.secrets/secure_boot_key.pem || rm -f ~/.secrets/secure_boot_key.pem
+
+          ls -lh dist/
+          sha256sum dist/*
+
+      - name: Upload signed artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rp2350-zero-cm-signed-v${{ github.event.inputs.rollback_version || '1' }}
+          path: |
+            dist/firmware-signed.uf2
+            dist/firmware-signed.elf
+            dist/otp_secureboot.json
