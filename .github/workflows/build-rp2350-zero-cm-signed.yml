@@ -49,6 +49,7 @@ jobs:
       - name: Sign firmware using picotool
         env:
           SECURE_BOOT_KEY: ${{ secrets.SECURE_BOOT_KEY }}
+          KEY_PASSWORD: ${{ secrets.SECURE_BOOT_KEY_PASSWORD }}
           ROLLBACK_VER: ${{ github.event.inputs.rollback_version || '1' }}
         run: |
           if [ -z "$SECURE_BOOT_KEY" ]; then
@@ -57,30 +58,32 @@ jobs:
           fi
 
           mkdir -p dist ~/.secrets
-          echo "$SECURE_BOOT_KEY" > ~/.secrets/secure_boot_key.pem
+          echo "$SECURE_BOOT_KEY" > ~/.secrets/enc_key.pem
+          chmod 600 ~/.secrets/enc_key.pem
+
+          # 如果设置了密码，则使用 openssl 解密出无密码私钥供 picotool 使用
+          if [ -n "$KEY_PASSWORD" ]; then
+            openssl ec -in ~/.secrets/enc_key.pem -out ~/.secrets/secure_boot_key.pem -passin pass:"$KEY_PASSWORD"
+          else
+            cp ~/.secrets/enc_key.pem ~/.secrets/secure_boot_key.pem
+          fi
           chmod 600 ~/.secrets/secure_boot_key.pem
 
-          # 在 nix 环境中运行 picotool 进行签名和验证
-          # 注意：nix mkFirmware 产出的 result/*.elf 已经自带分区表，直接签名即可
           nix develop -c bash -c "
             set -euo pipefail
 
             ELF_SRC=\$(ls result/*.elf | head -n 1)
 
-            # 1. 签名 ELF，同时导出 otp_secureboot.json
             picotool seal --sign --hash \"\$ELF_SRC\" -t elf dist/firmware-signed.elf -t elf \
               ~/.secrets/secure_boot_key.pem dist/otp_secureboot.json \
               --major 1 --minor 0 --rollback $ROLLBACK_VER
 
-            # 2. 将签名的 ELF 转换为 UF2
             picotool uf2 convert dist/firmware-signed.elf -t elf dist/firmware-signed.uf2
-
-            # 3. 校验签名
             picotool info -a dist/firmware-signed.elf
           "
 
-          # 抹除临时密钥文件
-          shred -u ~/.secrets/secure_boot_key.pem || rm -f ~/.secrets/secure_boot_key.pem
+          # 彻底抹除临时密钥
+          shred -u ~/.secrets/*.pem || rm -f ~/.secrets/*.pem
 
           ls -lh dist/
           sha256sum dist/*
