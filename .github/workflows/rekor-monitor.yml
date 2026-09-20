@@ -27,8 +27,8 @@
 name: rekor-monitor
 
 on:
-  schedule:
-    - cron: "23 * * * *" # hourly at :23 — upstream-recommended cadence (off the top of the hour, which GitHub heavily contends)
+  #schedule:
+    #- cron: "23 * * * *" # hourly at :23 — upstream-recommended cadence (off the top of the hour, which GitHub heavily contends)
   workflow_dispatch:
 
 # Deny everything at the top; the job below grants exactly what the reusable
